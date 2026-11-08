@@ -154,3 +154,8 @@ The native OpenXR sample portions retain their upstream source headers and
 licenses. PICO SDK/OpenXR runtime components remain subject to their respective
 PICO and Khronos licenses. EVA-specific bridge and application code is provided
 for the EVA project.
+
+> This branch builds the experimental `org.eva.pico.body` application. See
+> [BODY_EXPERIMENT.md](BODY_EXPERIMENT.md) for its provisional protocol, read-only
+> monitor, installation component and current verification limits. The original
+> README above describes the baseline EVA-VR application.

@@ -108,6 +108,7 @@ struct OpenXrProgram : IOpenXrProgram {
         }
 
     ~OpenXrProgram() override {
+        if (m_bodyTracker != XR_NULL_HANDLE && m_destroyBody) m_destroyBody(m_bodyTracker);
         if (m_input.actionSet != XR_NULL_HANDLE) {
             for (auto hand : {Side::LEFT, Side::RIGHT}) {
                 xrDestroySpace(m_input.handSpace[hand]);
@@ -265,6 +266,18 @@ struct OpenXrProgram : IOpenXrProgram {
         //hand tracking
         extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
         extensions.push_back(XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME);
+        uint32_t bodyExtensionCount = 0;
+        CHECK_XRCMD(xrEnumerateInstanceExtensionProperties(nullptr, 0, &bodyExtensionCount, nullptr));
+        std::vector<XrExtensionProperties> available(bodyExtensionCount);
+        for (auto& extension : available) extension.type = XR_TYPE_EXTENSION_PROPERTIES;
+        CHECK_XRCMD(xrEnumerateInstanceExtensionProperties(nullptr, bodyExtensionCount, &bodyExtensionCount, available.data()));
+        for (const auto& extension : available) {
+            if (strcmp(extension.extensionName, XR_BD_BODY_TRACKING_EXTENSION_NAME) == 0) {
+                m_bodyExtension = true;
+                extensions.push_back(XR_BD_BODY_TRACKING_EXTENSION_NAME);
+                break;
+            }
+        }
         XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
         createInfo.next = m_platformPlugin->GetInstanceCreateExtension();
         createInfo.enabledExtensionCount = (uint32_t)extensions.size();
@@ -809,6 +822,7 @@ struct OpenXrProgram : IOpenXrProgram {
         }
 
         CheckDeviceSupportExtentions();
+        InitializeBodyTracking();
         LogReferenceSpaces();
         InitializeActions();
         CreateVisualizedSpaces();
@@ -1017,6 +1031,9 @@ struct OpenXrProgram : IOpenXrProgram {
     void HandleSessionStateChangedEvent(const XrEventDataSessionStateChanged& stateChangedEvent, bool* exitRenderLoop, bool* requestRestart) {
         const XrSessionState oldState = m_sessionState;
         m_sessionState = stateChangedEvent.state;
+        if (m_sessionState != XR_SESSION_STATE_FOCUSED) {
+            m_application->setBodySample("{\"status\":\"session not focused\",\"joints\":[]}", "session not focused");
+        }
 
         Log::Write(Log::Level::Info, Fmt("XrEventDataSessionStateChanged: state %s->%s session=%lld time=%lld", to_string(oldState),
                                          to_string(m_sessionState), stateChangedEvent.session, stateChangedEvent.time));
@@ -1408,11 +1425,77 @@ struct OpenXrProgram : IOpenXrProgram {
         }
     }
 
+    void InitializeBodyTracking() {
+        if (!m_bodyExtension) { m_bodyStatus = "extension unavailable"; return; }
+        XrSystemBodyTrackingPropertiesBD bodyProps{XR_TYPE_SYSTEM_BODY_TRACKING_PROPERTIES_BD};
+        XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES, &bodyProps};
+        XrResult result = xrGetSystemProperties(m_instance, m_systemId, &properties);
+        if (XR_FAILED(result) || !bodyProps.supportsBodyTracking) {
+            m_bodyStatus = "system unsupported or query failed"; return;
+        }
+        if (XR_FAILED(xrGetInstanceProcAddr(m_instance, "xrCreateBodyTrackerBD", reinterpret_cast<PFN_xrVoidFunction*>(&m_createBody))) ||
+            XR_FAILED(xrGetInstanceProcAddr(m_instance, "xrDestroyBodyTrackerBD", reinterpret_cast<PFN_xrVoidFunction*>(&m_destroyBody))) ||
+            XR_FAILED(xrGetInstanceProcAddr(m_instance, "xrLocateBodyJointsBD", reinterpret_cast<PFN_xrVoidFunction*>(&m_locateBody))) ||
+            !m_createBody || !m_destroyBody || !m_locateBody) {
+            m_bodyStatus = "extension functions unavailable"; return;
+        }
+        XrBodyTrackerCreateInfoBD info{XR_TYPE_BODY_TRACKER_CREATE_INFO_BD};
+        info.jointSet = XR_BODY_JOINT_SET_FULL_BODY_JOINTS_BD;
+        result = m_createBody(m_session, &info, &m_bodyTracker);
+        if (XR_FAILED(result)) {
+            m_bodyStatus = "tracker create failed " + std::to_string(result);
+            m_bodyTracker = XR_NULL_HANDLE;
+        } else m_bodyStatus = "waiting for tracking";
+        Log::Write(Log::Level::Info, Fmt("EVA-VR Body: %s", m_bodyStatus.c_str()));
+    }
+
+    void SampleBody(XrTime time) {
+        static const char* names[] = {"pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee", "spine2", "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot", "neck", "left_collar", "right_collar", "head", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hand", "right_hand"};
+        XrBodyJointLocationBD joints[XR_BODY_JOINT_COUNT_BD]{};
+        XrBodyJointLocationsBD locations{XR_TYPE_BODY_JOINT_LOCATIONS_BD};
+        locations.jointLocationCount = XR_BODY_JOINT_COUNT_BD;
+        locations.jointLocations = joints;
+        XrResult result = XR_ERROR_FUNCTION_UNSUPPORTED;
+        if (m_bodyTracker != XR_NULL_HANDLE && IsSessionFocused()) {
+            XrBodyJointsLocateInfoBD info{XR_TYPE_BODY_JOINTS_LOCATE_INFO_BD};
+            info.baseSpace = m_appSpace;
+            info.time = time;
+            result = m_locateBody(m_bodyTracker, &info, &locations);
+        }
+        if (m_bodyTracker != XR_NULL_HANDLE) {
+            if (!IsSessionFocused()) m_bodyStatus = "session not focused";
+            else if (result != XR_SUCCESS) m_bodyStatus = "locate failed " + std::to_string(result);
+            else m_bodyStatus = locations.allJointLocationsValid ? "tracking 24/24" : "tracking incomplete";
+        }
+        std::string json = "{\"schema\":\"eva.body.pico_bd.experimental\",\"version\":1,\"source\":\"XR_BD_body_tracking\",\"app_version\":\"0.1.0-body-experimental\",\"sample_sequence\":" + std::to_string(m_bodySequence++) +
+            ",\"xr_predicted_display_time\":" + std::to_string(time) + ",\"clock_domain\":\"openxr_time\",\"reference_space\":\"" + m_options.AppSpace + "\",\"joint_space\":\"base_space\",\"units\":\"metres\",\"orientation_order\":\"xyzw\",\"sampling\":\"previous_render_sample_async_to_controller\",\"status\":\"" + m_bodyStatus + "\",\"runtime_all_joint_locations_valid\":" + (result == XR_SUCCESS && locations.allJointLocationsValid ? "true" : "false") + ",\"joints\":[";
+        unsigned validCount = 0;
+        if (result == XR_SUCCESS) for (unsigned i = 0; i < XR_BODY_JOINT_COUNT_BD; ++i) {
+            const auto& joint = joints[i];
+            const auto& p = joint.pose.position; const auto& q = joint.pose.orientation;
+            const bool pv = (joint.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+            const bool ov = (joint.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w);
+            if (pv && ov) ++validCount;
+            if (i) json += ",";
+            json += "{\"name\":\"" + std::string(names[i]) + "\",\"location_flags\":" + std::to_string(joint.locationFlags) + ",\"position\":";
+            char values[256];
+            if (pv) { std::snprintf(values, sizeof(values), "[%.9g,%.9g,%.9g]", p.x,p.y,p.z); json += values; } else json += "null";
+            json += ",\"orientation_xyzw\":";
+            if (ov) { std::snprintf(values, sizeof(values), "[%.9g,%.9g,%.9g,%.9g]", q.x,q.y,q.z,q.w); json += values; } else json += "null";
+            json += "}";
+        }
+        json += "]}";
+        if (result == XR_SUCCESS) m_bodyStatus = "valid " + std::to_string(validCount) + "/24";
+        m_application->setBodySample(json, m_bodyStatus);
+    }
+
     void RenderFrame() override {
         CHECK(m_session != XR_NULL_HANDLE);
         XrFrameWaitInfo frameWaitInfo{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frameState{XR_TYPE_FRAME_STATE};
         CHECK_XRCMD(xrWaitFrame(m_session, &frameWaitInfo, &frameState));
+
+        SampleBody(frameState.predictedDisplayTime);
 
         XrFrameBeginInfo frameBeginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         CHECK_XRCMD(xrBeginFrame(m_session, &frameBeginInfo));
@@ -1607,6 +1690,13 @@ struct OpenXrProgram : IOpenXrProgram {
     const Options m_options;
     std::shared_ptr<IPlatformPlugin> m_platformPlugin;
     std::shared_ptr<IGraphicsPlugin> m_graphicsPlugin;
+    bool m_bodyExtension{false};
+    XrBodyTrackerBD m_bodyTracker{XR_NULL_HANDLE};
+    PFN_xrCreateBodyTrackerBD m_createBody{nullptr};
+    PFN_xrDestroyBodyTrackerBD m_destroyBody{nullptr};
+    PFN_xrLocateBodyJointsBD m_locateBody{nullptr};
+    uint64_t m_bodySequence{0};
+    std::string m_bodyStatus{"initializing"};
     XrInstance m_instance{XR_NULL_HANDLE};
     XrSession m_session{XR_NULL_HANDLE};
     XrSpace m_appSpace{XR_NULL_HANDLE};

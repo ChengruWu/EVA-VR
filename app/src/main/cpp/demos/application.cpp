@@ -31,6 +31,7 @@ public:
     virtual void setControllerPower(int leftright, int power) override;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) override;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) override;
+    void setBodySample(const std::string& json, const std::string& status) override { mBodyJson = json; mBodyStatus = status; }
     virtual void inputEvent(int leftright, const ApplicationEvent& event) override;
     bool isExitRequested() const override { return mExitRequested; }
     virtual void renderFrame(const XrPosef& pose, const glm::mat4& project, const glm::mat4& view, int32_t eye) override;
@@ -79,6 +80,8 @@ private:
 
     bool mIsShowDashboard = true;
     bool mExitRequested = false;
+    std::string mBodyJson = "{\"status\":\"initializing\",\"joints\":[]}";
+    std::string mBodyStatus = "initializing";
 
     std::vector<std::string> mAllVideoFiles;
     int32_t mCount = 0;
@@ -251,7 +254,7 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
             std::to_string(sequence++) + ",\"client_time_ms\":" + std::to_string(now) +
             ",\"reference_space\":\"local-floor\",\"controllers\":{\"left\":" +
             controller(mControllerPose[HAND_LEFT], *mControllerEvent[HAND_LEFT], HAND_LEFT) +
-            ",\"right\":" + controller(mControllerPose[HAND_RIGHT], *mControllerEvent[HAND_RIGHT], HAND_RIGHT) + "}}";
+            ",\"right\":" + controller(mControllerPose[HAND_RIGHT], *mControllerEvent[HAND_RIGHT], HAND_RIGHT) + "},\"body\":" + mBodyJson + "}";
         eva_bridge_send_frame(frame);
     }
 
@@ -316,7 +319,8 @@ void Application::showPoseStatus() {
     ImGui::TextColored(connected ? ImVec4(0.25f, 1.0f, 0.45f, 1.0f) : ImVec4(1.0f, 0.35f, 0.25f, 1.0f),
                        "HOST: %s", connected ? "CONNECTED" : "DISCONNECTED");
     ImGui::SameLine();
-    ImGui::Text("  EVA-VR");
+    ImGui::Text("  EVA-VR Body");
+    ImGui::Text("BODY: %s", mBodyStatus.c_str());
 
     if (ImGui::BeginTable("pose status", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn("source");

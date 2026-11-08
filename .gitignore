@@ -1,4 +1,7 @@
 .gradle/
+.toolchain/
+.venv/
+__pycache__/
 **/build/
 .cxx/
 local.properties

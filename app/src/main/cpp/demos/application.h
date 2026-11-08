@@ -82,6 +82,7 @@ public:
     virtual void setControllerPower(int leftright, int power) = 0;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) = 0;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) = 0;
+    virtual void setBodySample(const std::string& json, const std::string& status) = 0;
     virtual void inputEvent(int leftright, const ApplicationEvent& event) = 0;
     virtual bool isExitRequested() const = 0;
     virtual void renderFrame(const XrPosef& pose, const glm::mat4& project, const glm::mat4& view, int32_t eye) = 0;
