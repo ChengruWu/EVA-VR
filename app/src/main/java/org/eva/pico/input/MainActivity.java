@@ -8,14 +8,18 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import okhttp3.*;
+import okio.ByteString;
 import org.json.JSONObject;
 
 public class MainActivity extends NativeActivity {
     static { System.loadLibrary("openxr_loader"); System.loadLibrary("eva_pico"); }
     public native void setNativeAssetManager(AssetManager assetManager);
+    private native void setSimulationPixels(int[] pixels, int width, int height);
     private static final String TAG = "EVA-VR";
     private static final String EXTRA_SERVER_URL = "server_url";
     // Used when the launcher passes no `--es server_url`. Servers started with
@@ -26,9 +30,11 @@ public class MainActivity extends NativeActivity {
     private final OkHttpClient client = new OkHttpClient.Builder()
         .pingInterval(5, TimeUnit.SECONDS).build();
     private volatile WebSocket socket;
+    private volatile WebSocket viewSocket;
     private volatile boolean connected, resumed, focused = true;
     private volatile String endpoint = DEFAULT_ENDPOINT;
     private final Runnable reconnect = this::connect;
+    private final Runnable reconnectView = this::connectView;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -59,11 +65,12 @@ public class MainActivity extends NativeActivity {
         endpoint = next;
         // The endpoint changed underneath a live socket; re-dial on the new one.
         disconnect();
-        if (resumed) connect();
+        if (resumed) { connect(); connectView(); }
     }
     @Override protected void onResume() {
         super.onResume(); resumed = true;
         connect();
+        connectView();
     }
     @Override protected void onPause() {
         resumed = false; disconnect(); super.onPause();
@@ -74,9 +81,42 @@ public class MainActivity extends NativeActivity {
     }
     private synchronized void disconnect() {
         handler.removeCallbacks(reconnect);
+        handler.removeCallbacks(reconnectView);
         WebSocket old = socket; socket = null; connected = false;
+        WebSocket oldView = viewSocket; viewSocket = null;
         haptics.clear();
         if (old != null) old.cancel();
+        if (oldView != null) oldView.cancel();
+    }
+    private synchronized void connectView() {
+        if (!resumed || viewSocket != null) return;
+        viewSocket = client.newWebSocket(new Request.Builder().url("ws://127.0.0.1:43877/view").build(), new WebSocketListener() {
+            @Override public void onMessage(WebSocket ws, ByteString bytes) {
+                if (viewSocket != ws || !resumed || !focused || bytes.size() > 500000) return;
+                byte[] encoded = bytes.toByteArray();
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(encoded, 0, encoded.length, bounds);
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || bounds.outWidth > 1280 || bounds.outHeight > 720) return;
+                Bitmap bitmap = BitmapFactory.decodeByteArray(encoded, 0, encoded.length);
+                if (bitmap == null) return;
+                try {
+                    int w = bitmap.getWidth(), h = bitmap.getHeight();
+                    if (w <= 0 || h <= 0 || w > 1280 || h > 720) return;
+                    int[] pixels = new int[w * h];
+                    bitmap.getPixels(pixels, 0, w, 0, 0, w, h);
+                    setSimulationPixels(pixels, w, h);
+                } finally { bitmap.recycle(); }
+            }
+            @Override public void onClosing(WebSocket ws, int code, String reason) { ws.close(code, reason); }
+            @Override public void onClosed(WebSocket ws, int code, String reason) { lostView(ws); }
+            @Override public void onFailure(WebSocket ws, Throwable error, Response response) { lostView(ws); }
+        });
+    }
+    private synchronized void lostView(WebSocket ws) {
+        if (viewSocket != ws) return;
+        viewSocket = null;
+        if (resumed) handler.postDelayed(reconnectView, 2000);
     }
     private synchronized void connect() {
         if (!resumed || socket != null || endpoint == null) return;

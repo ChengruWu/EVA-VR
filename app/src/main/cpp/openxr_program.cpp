@@ -1465,17 +1465,28 @@ struct OpenXrProgram : IOpenXrProgram {
         if (m_bodyTracker != XR_NULL_HANDLE) {
             if (!IsSessionFocused()) m_bodyStatus = "session not focused";
             else if (result != XR_SUCCESS) m_bodyStatus = "locate failed " + std::to_string(result);
-            else m_bodyStatus = locations.allJointLocationsValid ? "tracking 24/24" : "tracking incomplete";
         }
+        const auto positionValid = [](const XrBodyJointLocationBD& joint) {
+            const auto& p = joint.pose.position;
+            return (joint.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        };
+        const auto orientationValid = [](const XrBodyJointLocationBD& joint) {
+            const auto& q = joint.pose.orientation;
+            const double normSquared = double(q.x)*q.x + double(q.y)*q.y + double(q.z)*q.z + double(q.w)*q.w;
+            return (joint.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && std::isfinite(normSquared) && normSquared >= 1e-12;
+        };
+        unsigned validCount = 0;
+        if (result == XR_SUCCESS) for (const auto& joint : joints) {
+            if (positionValid(joint) && orientationValid(joint)) ++validCount;
+        }
+        if (result == XR_SUCCESS) m_bodyStatus = validCount == XR_BODY_JOINT_COUNT_BD ? "tracking 24/24" : "tracking incomplete";
         std::string json = "{\"schema\":\"eva.body.pico_bd.experimental\",\"version\":1,\"source\":\"XR_BD_body_tracking\",\"app_version\":\"0.1.0-body-experimental\",\"sample_sequence\":" + std::to_string(m_bodySequence++) +
             ",\"xr_predicted_display_time\":" + std::to_string(time) + ",\"clock_domain\":\"openxr_time\",\"reference_space\":\"" + m_options.AppSpace + "\",\"joint_space\":\"base_space\",\"units\":\"metres\",\"orientation_order\":\"xyzw\",\"sampling\":\"previous_render_sample_async_to_controller\",\"status\":\"" + m_bodyStatus + "\",\"runtime_all_joint_locations_valid\":" + (result == XR_SUCCESS && locations.allJointLocationsValid ? "true" : "false") + ",\"joints\":[";
-        unsigned validCount = 0;
         if (result == XR_SUCCESS) for (unsigned i = 0; i < XR_BODY_JOINT_COUNT_BD; ++i) {
             const auto& joint = joints[i];
             const auto& p = joint.pose.position; const auto& q = joint.pose.orientation;
-            const bool pv = (joint.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
-            const bool ov = (joint.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w);
-            if (pv && ov) ++validCount;
+            const bool pv = positionValid(joint);
+            const bool ov = orientationValid(joint);
             if (i) json += ",";
             json += "{\"name\":\"" + std::string(names[i]) + "\",\"location_flags\":" + std::to_string(joint.locationFlags) + ",\"position\":";
             char values[256];

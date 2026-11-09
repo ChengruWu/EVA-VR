@@ -31,7 +31,14 @@ public:
     virtual void setControllerPower(int leftright, int power) override;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) override;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) override;
-    void setBodySample(const std::string& json, const std::string& status) override { mBodyJson = json; mBodyStatus = status; }
+    void setBodySample(const std::string& json, const std::string& status) override {
+        mBodyJson = json; mBodyStatus = status;
+        if (status == "session not focused" && mGuideStartMs >= 0) {
+            mGuideStartMs = -1;
+            mGuidePhase = "interrupted";
+            mGuideSeconds = 0;
+        }
+    }
     virtual void inputEvent(int leftright, const ApplicationEvent& event) override;
     bool isExitRequested() const override { return mExitRequested; }
     virtual void renderFrame(const XrPosef& pose, const glm::mat4& project, const glm::mat4& view, int32_t eye) override;
@@ -82,6 +89,13 @@ private:
     bool mExitRequested = false;
     std::string mBodyJson = "{\"status\":\"initializing\",\"joints\":[]}";
     std::string mBodyStatus = "initializing";
+    int64_t mGuideStartMs = -1;
+    uint64_t mGuideRun = 0;
+    bool mGuideYDown = false;
+    std::string mGuidePhase = "ready";
+    int mGuideSeconds = 0;
+    GLuint mSimulationTexture = 0;
+    int64_t mSimulationUpdatedMs = 0;
 
     std::vector<std::string> mAllVideoFiles;
     int32_t mCount = 0;
@@ -210,6 +224,13 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
     mControllerEvent[leftright] = &mControllerState[leftright];
 
     if (leftright == HAND_LEFT) {
+        const bool pressed = event.click_y;
+        if (pressed && !mGuideYDown && eva_bridge_is_connected() && mBodyStatus == "valid 24/24") {
+            mGuideStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            ++mGuideRun;
+        }
+        mGuideYDown = pressed;
         return;
     }
     if (event.controllerEventBit & CONTROLLER_EVENT_BIT_click_trigger) {
@@ -222,6 +243,22 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
     if (leftright == HAND_RIGHT && mControllerEvent[HAND_LEFT] != nullptr) {
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (mGuideStartMs >= 0) {
+            const auto elapsed = now - mGuideStartMs;
+            static const char* phases[] = {"stand", "left_arm", "right_arm", "bend", "squat"};
+            if (elapsed < 8000) {
+                mGuidePhase = "prepare";
+                mGuideSeconds = static_cast<int>((8000 - elapsed + 999) / 1000);
+            } else if (elapsed < 68000) {
+                const auto phaseElapsed = elapsed - 8000;
+                mGuidePhase = phases[phaseElapsed / 12000];
+                mGuideSeconds = static_cast<int>((12000 - phaseElapsed % 12000 + 999) / 1000);
+            } else {
+                mGuidePhase = "complete";
+                mGuideSeconds = 0;
+                mGuideStartMs = -1;
+            }
+        }
         static uint64_t sequence = 0;
         auto controller = [](const XrPosef& pose, const ApplicationEvent& state, int hand) {
             const bool primary = hand == HAND_LEFT ? state.click_x : state.click_a;
@@ -254,7 +291,9 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
             std::to_string(sequence++) + ",\"client_time_ms\":" + std::to_string(now) +
             ",\"reference_space\":\"local-floor\",\"controllers\":{\"left\":" +
             controller(mControllerPose[HAND_LEFT], *mControllerEvent[HAND_LEFT], HAND_LEFT) +
-            ",\"right\":" + controller(mControllerPose[HAND_RIGHT], *mControllerEvent[HAND_RIGHT], HAND_RIGHT) + "},\"body\":" + mBodyJson + "}";
+            ",\"right\":" + controller(mControllerPose[HAND_RIGHT], *mControllerEvent[HAND_RIGHT], HAND_RIGHT) + "},\"body\":" + mBodyJson +
+            ",\"body_guide\":{\"run\":" + std::to_string(mGuideRun) + ",\"phase\":\"" + mGuidePhase +
+            "\",\"seconds_remaining\":" + std::to_string(mGuideSeconds) + "}}";
         eva_bridge_send_frame(frame);
     }
 
@@ -321,6 +360,51 @@ void Application::showPoseStatus() {
     ImGui::SameLine();
     ImGui::Text("  EVA-VR Body");
     ImGui::Text("BODY: %s", mBodyStatus.c_str());
+    std::vector<unsigned char> pixels;
+    int imageWidth = 0, imageHeight = 0;
+    if (eva_bridge_take_simulation_pixels(pixels, imageWidth, imageHeight)) {
+        if (!mSimulationTexture) {
+            glGenTextures(1, &mSimulationTexture);
+            glBindTexture(GL_TEXTURE_2D, mSimulationTexture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        glBindTexture(GL_TEXTURE_2D, mSimulationTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, imageWidth, imageHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        mSimulationUpdatedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    const auto imageAge = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() - mSimulationUpdatedMs;
+    if (mSimulationTexture && imageAge < 3000) {
+        ImGui::Text("SIMULATION VIEW");
+        ImGui::Image((ImTextureID)(intptr_t)mSimulationTexture, ImVec2(560, 315));
+    } else if (mSimulationTexture) {
+        ImGui::TextColored(ImVec4(1, 0.4f, 0.2f, 1), "SIMULATION VIEW DISCONNECTED");
+    }
+    ImGui::Separator();
+    ImGui::SetWindowFontScale(2.0f);
+    ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.35f, 1.0f), "BODY GUIDE");
+    if (mGuidePhase == "ready" || mGuidePhase == "interrupted") {
+        ImGui::Text("LEFT Y: START");
+        ImGui::Text("WAIT FOR BODY 24/24");
+        if (mGuidePhase == "interrupted") ImGui::Text("INTERRUPTED - PRESS Y");
+    } else if (mGuidePhase == "complete") {
+        ImGui::Text("COMPLETE");
+        ImGui::Text("PLEASE STAND STILL");
+    } else {
+        const char* instruction = mGuidePhase == "prepare" ? "GET READY" :
+            mGuidePhase == "stand" ? "STAND STILL" :
+            mGuidePhase == "left_arm" ? "LEFT ARM\nUP AND DOWN" :
+            mGuidePhase == "right_arm" ? "RIGHT ARM\nUP AND DOWN" :
+            mGuidePhase == "bend" ? "BEND FORWARD\nTHEN STAND" : "SQUAT\nTHEN STAND";
+        ImGui::TextUnformatted(instruction);
+        ImGui::Text("%d SECONDS", mGuideSeconds);
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    if (mGuidePhase != "ready" && mGuidePhase != "interrupted") return;
 
     if (ImGui::BeginTable("pose status", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn("source");
@@ -422,7 +506,7 @@ void Application::showDashboard(const glm::mat4& project, const glm::mat4& view)
     ImGui::SameLine();
     ImGui::Text("%s  |  OS %s", mDeviceModel.c_str(), mDeviceOS.c_str());
     showPoseStatus();
-    showDashboardController();
+    if (mGuidePhase == "ready" || mGuidePhase == "interrupted") showDashboardController();
     mPanel->end();
     mPanel->render(project, view);
 }

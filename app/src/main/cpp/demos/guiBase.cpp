@@ -243,7 +243,7 @@ bool GuiBase::renderDrawData(ImDrawData* draw_data) {
                 // Apply scissor/clipping rectangle (Y is inverted in OpenGL)
                 GL_CALL(glScissor((int)clip_min.x, (int)((float)fb_height - clip_max.y), (int)(clip_max.x - clip_min.x), (int)(clip_max.y - clip_min.y)));
                 // Bind texture, Draw
-                GL_CALL(glBindTexture(GL_TEXTURE_2D, mFontTexture));
+                GL_CALL(glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->GetTexID()));
                 GL_CALL(glDrawElements(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, (void*)(intptr_t)(pcmd->IdxOffset * sizeof(ImDrawIdx))));
             }
         }

@@ -2,6 +2,7 @@
 
 #include <android/log.h>
 #include <mutex>
+#include <vector>
 
 namespace {
 JavaVM* g_vm = nullptr;
@@ -10,6 +11,32 @@ jmethodID g_poll_haptic = nullptr;
 jmethodID g_send_frame = nullptr;
 jmethodID g_is_connected = nullptr;
 std::mutex g_mutex;
+std::mutex g_image_mutex;
+std::vector<unsigned char> g_image;
+int g_image_width = 0, g_image_height = 0;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_eva_pico_input_MainActivity_setSimulationPixels(JNIEnv* env, jobject, jintArray pixels, jint width, jint height) {
+    if (!pixels || width <= 0 || height <= 0 || width > 1280 || height > 720 || env->GetArrayLength(pixels) != width * height) return;
+    std::vector<jint> argb(static_cast<size_t>(width) * height);
+    env->GetIntArrayRegion(pixels, 0, width * height, argb.data());
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    std::vector<unsigned char> rgba(argb.size() * 4);
+    for (size_t i = 0; i < argb.size(); ++i) {
+        const uint32_t p = static_cast<uint32_t>(argb[i]);
+        rgba[4*i] = (p >> 16) & 255; rgba[4*i+1] = (p >> 8) & 255;
+        rgba[4*i+2] = p & 255; rgba[4*i+3] = (p >> 24) & 255;
+    }
+    std::lock_guard<std::mutex> lock(g_image_mutex);
+    g_image.swap(rgba); g_image_width = width; g_image_height = height;
+}
+
+bool eva_bridge_take_simulation_pixels(std::vector<unsigned char>& rgba, int& width, int& height) {
+    std::lock_guard<std::mutex> lock(g_image_mutex);
+    if (g_image.empty()) return false;
+    rgba.swap(g_image); width = g_image_width; height = g_image_height;
+    return true;
 }
 
 void eva_bridge_set_activity(JNIEnv* env, jobject activity) {
